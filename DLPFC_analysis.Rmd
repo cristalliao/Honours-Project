@@ -1,0 +1,769 @@
+---
+title: "DLPFC_analysis"
+output: html_document
+date: "2023-10-02"
+---
+
+```{r,warning=FALSE,error=FALSE,massage=FALSE,prompt=FALSE}
+suppressPackageStartupMessages({
+library(readr)
+library(Seurat)
+library(SeuratDisk)
+library(SeuratObject)
+library(anndata)
+library(ggplot2)
+library(factoextra) # clustering visualization
+library(mclust)
+library(zinbwave)
+library(SingleCellExperiment)
+library(aricode)
+library(pscl)
+library(knitr)
+library(kableExtra)
+library(Biobase)
+library(Matrix)
+library(MCMCpack)
+library(Hmisc)
+library(tidyverse)  # data manipulation
+library(cluster)  # clustering algorithms
+library(dendextend) # for comparing two dendrograms
+library(dplyr)
+library(GGally) # correlation plot
+library(tidyr)
+library(flextable)
+library(NMF)
+library(ggpubr) # MDS
+library(RcppML) 
+library(reshape2) 
+library(cowplot) 
+library(MAST)
+library(smfishHmrf)
+library(trendsceek)
+library(sparklyr)
+library(multinet)
+library(RTriangle)
+library(FactoMineR)
+library(jackstraw)
+library(CARD)
+library(spacexr)
+library(gridExtra)
+library(pbmcapply)
+library(Giotto)
+library(smfishHmrf)
+library(BayesSpace)
+library(Banksy)
+library(gridExtra)
+})
+```
+
+### DLPFC dataset 151673
+
+```{r}
+library(BayesSpace)
+library(ggplot2)
+```
+
+#### Read the dataset
+
+```{r}
+dlpfc_151673 <- getRDS("2020_maynard_prefrontal-cortex", "151673")
+```
+
+#### BayesSpace
+##### Processing the data
+
+A cleaned SingleCellExperiment object containing the dataset (after removing data specific to the spatialLIBD analyses) is available through BayesSpace. We preprocessed the data by performing PCA on the top 2,000 HVGs.
+
+```{r}
+set.seed(2023)
+dec <- scran::modelGeneVar(dlpfc_151673)
+top <- scran::getTopHVGs(dec, n = 2000)
+dlpfc_151673 <- scater::runPCA(dlpfc_151673, subset_row=top)
+## Add BayesSpace metadata
+dlpfc_151673 <- spatialPreprocess(dlpfc_151673, platform="Visium", skip.PCA=TRUE)
+```
+
+We clustered the first 15 principal components, specifying 7 clusters to match the six brain layers plus one white matter region, and ran the MCMC algorithm for 50,000 iterations. We set our smoothing parameter gamma to 3, which we generally suggest for Visium datasets.
+
+```{r}
+q <- 7  # Number of clusters
+d <- 13  # Number of PCs
+```
+
+```{r}
+## Run BayesSpace clustering
+set.seed(2023)
+dlpfc_BayesSpace <- dlpfc_151673
+dlpfc_BayesSpace <- spatialCluster(dlpfc_BayesSpace, q=q, d=d, platform='Visium',nrep=50000, burn.in = 1000, gamma=3, save.chain=TRUE)
+```
+
+###### Save the data
+
+```{r}
+#saveRDS(dlpfc_BayesSpace,"/dski/nobackup/xiaoyinl/DLPFC_analysis/BayesSpace_151673_t-distributed")
+```
+
+###### Read the data
+
+```{r}
+dlpfc_151673_BayesSpace <- readRDS("/dski/nobackup/xiaoyinl/DLPFC_analysis/BayesSpace_151673_t-distributed")
+```
+
+```{r}
+BayesSpace_labels_151673 <- dlpfc_151673_BayesSpace$spatial.cluster
+```
+
+```{r}
+## We recoded the cluster labels to match the expected brain layers
+BayesSpace_labels_151673_relabel <- dplyr::recode(BayesSpace_labels_151673, 1, 4, 6, 3, 7, 5, 2)
+```
+
+###### Figure
+
+```{r}
+## View results
+clusterPlot(dlpfc_151673_BayesSpace, label=BayesSpace_labels_151673_relabel, palette=NULL, size=0.05) +
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="BayesSpace")
+```
+
+```{r}
+BayesSpace_clusters_151673 <- BayesSpace_labels_151673
+```
+
+#### Other clustering methods
+
+Next, we ran several popular non-spatial clustering algorithms that are typically used in scRNA-seq analysis - k-means, Louvain, and mclust. For each of these algorithms, we clustered the first 15 principal components of the log-normalized expression matrix, specifying 7 clusters when possible. The Louvain algorithm was run on the k=10 shared nearest neighbor graph (weighted using Jaccard similarity). The mclust algorithm was run using the EEE multivariate mixture model.
+
+###### K-means
+
+```{r}
+d <- 15
+pca_data_selected_dimension_df <- reducedDim(dlpfc_151673, "PCA")[, seq_len(d)]
+```
+
+```{r}
+## K-means with 7 clusters
+set.seed(2023)
+k_means_clusters_151673 <- kmeans(pca_data_selected_dimension_df, centers = 7)$cluster
+```
+
+```{r}
+## We recoded the cluster labels to match the expected brain layers
+kmeans_labels_151673_relabel <- dplyr::recode(k_means_clusters_151673, 1, 2, 6, 3, 5, 4, 7)
+```
+
+```{r}
+## View results
+clusterPlot(dlpfc_151673, label=kmeans_labels_151673_relabel, palette=NULL, size=0.05)+
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="K-means")
+```
+
+###### Hclust
+
+```{r}
+## hclust 
+set.seed(2023)
+# Dissimilarity matrix
+PCA_results_matrix <- dist(pca_data_selected_dimension_df, method = "euclidean")
+# Ward's method
+PCA_results_hclust_ward <- hclust(PCA_results_matrix, method = "ward.D2" )
+# Cut tree into 7 groups
+hclust_clusters_151673 <- cutree(PCA_results_hclust_ward, k = 7)
+```
+
+```{r}
+## We recoded the cluster labels to match the expected brain layers
+hclust_labels_151673_relabel <- dplyr::recode(hclust_clusters_151673, 2, 1, 7, 3, 5, 6, 4)
+```
+
+```{r}
+## View results
+clusterPlot(dlpfc_151673, label=hclust_labels_151673_relabel, palette=NULL, size=0.05)+
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="Hierarchical clustering")
+```
+
+###### Louvain
+
+```{r}
+dlpfc_151673_counts_df <- counts(dlpfc_151673)
+dlpfc_151673_counts_matrix <- as.matrix(dlpfc_151673_counts_df)
+sce_louvain <- SingleCellExperiment(assays=list(
+  counts=as(dlpfc_151673_counts_matrix,"dgCMatrix")))
+pca_data_selected_dimension_matrix <- as.matrix(pca_data_selected_dimension_df)
+reducedDims(sce_louvain)[["PCA"]] <- pca_data_selected_dimension_matrix
+sce_louvain
+```
+
+```{r}
+## Louvain with 7 clusters
+set.seed(2023)
+g.jaccard = scran::buildSNNGraph(sce_louvain, use.dimred="PCA", type="jaccard")
+louvain_clusters_151673 <- igraph::cluster_louvain(g.jaccard, resolution = 0.8)$membership
+```
+
+```{r}
+## We recoded the cluster labels to match the expected brain layers
+louvain_labels_151673_relabel <- dplyr::recode(louvain_clusters_151673, 3, 1, 7, 5, 6, 2, 4)
+```
+
+```{r}
+## View results
+clusterPlot(dlpfc_151673,label=louvain_labels_151673_relabel, palette=NULL, size=0.05)+
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="Louvain")
+```
+
+### Spatial clustering algorithms
+
+#### BANKSY
+
+```{r}
+library(Banksy)
+library(SummarizedExperiment)
+library(SpatialExperiment)
+library(scuttle)
+library(scater)
+library(cowplot)
+library(ggplot2)
+```
+
+```{r}
+### Banksy
+#### Preprocessing
+pca_data_selected_dimension_transpose <- t(pca_data_selected_dimension_df) # PCA results
+pca_data_selected_dimension_transpose_df <- as.data.frame(pca_data_selected_dimension_transpose)
+expr_banksy <- as.matrix(pca_data_selected_dimension_transpose_df)
+location_banksy <- data.frame(row=dlpfc_151673@colData$array_row, 
+                              col=dlpfc_151673@colData$array_col)
+rownames(location_banksy) = colnames(dlpfc_151673)
+location_banksy
+```
+
+```{r}
+bank_object <- BanksyObject(own.expr = expr_banksy,
+                           cell.locs = location_banksy)
+head(bank_object)
+```
+
+```{r}
+set.seed(2023)
+bank_object <- ClusterBanksy(bank_object, method = 'leiden', pca = FALSE, resolution = 0.9)
+```
+
+```{r}
+features <- clust.names(bank_object)
+feature.types <- rep('discrete', 1)
+main <- c('BANKSY')
+plotSpatialFeatures(bank_object, by = features, type = feature.types, main = main, pt.size = 0.9, main.size = 15)
+```
+
+```{r}
+bank_object_meta_data_df <- as.data.frame(bank_object@meta.data)
+spatial_cluster_Banksy_clusters <- bank_object_meta_data_df$clust_M1_lam0.2_k50_res0.9
+```
+
+```{r}
+## We recoded the cluster labels to match the expected brain layers
+Banksy_labels_151673_relabel <- dplyr::recode(spatial_cluster_Banksy_clusters, 3, 7, 2, 6, 1, 5, 4)
+```
+
+```{r}
+## View results
+clusterPlot(dlpfc_151673,label=Banksy_labels_151673_relabel, palette=NULL, size=0.05)+
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="BANKSY")
+```
+
+#### HMRF
+
+We also ran one recently published spatial clustering algorithms Giotto (HMRF). To analyze these samples we adapted the respective tutorials (Giotto) and provide this code. For ease of reproduction, we include the obtained cluster labels directly with this package.
+
+```{r}
+HMRF_labels_151673 <- read.csv(system.file("extdata", "2020_maynard_prefrontal-cortex", "151673.Giotto_HMRF.csv", package = "BayesSpace"))$HMRF_km_Delaunay_k7_b.9
+```
+
+```{r}
+## We recoded the cluster labels to match the expected brain layers
+HMRF_labels_151673_relabel <- dplyr::recode(HMRF_labels_151673, 1, 5, 6, 4, 2, 3, 7)
+```
+
+```{r}
+## View results
+clusterPlot(dlpfc_151673,label=HMRF_labels_151673_relabel, palette=NULL, size=0.05)+
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="Giotto")
+```
+
+### 3D clustering
+
+#### STitch3D
+
+```{r}
+clusters_151673_STitch3D <- read.csv("/dski/nobackup/xiaoyinl/DLPFC_analysis/STitch3D_dataset/results_DLPFC/cluster_results_151673_whole.csv")
+clusters_151673_STitch3D$Cluster = clusters_151673_STitch3D$Cluster+1
+clusters_151673_STitch3D
+```
+
+```{r}
+subset_dlpfc_151673 <- dlpfc_151673[, dlpfc_151673@colData$barcode %in% clusters_151673_STitch3D$barcode]
+```
+
+```{r}
+STitch3D_labels_151673 <- clusters_151673_STitch3D$Cluster
+```
+
+```{r}
+## We recoded the cluster labels to match the expected brain layers
+STitch3D_labels_151673_relabel <- dplyr::recode(clusters_151673_STitch3D$Cluster, 5, 4, 3, 2, 7, 6,1)
+```
+
+```{r}
+## View results
+clusterPlot(subset_dlpfc_151673, label=STitch3D_labels_151673_relabel, palette=NULL, size=0.05)+
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="STitch3D")
+```
+
+```{r}
+Manual_annotation_STitch3D <- subset_dlpfc_151673@colData$layer_guess_reordered
+```
+
+```{r}
+Manual_annotation_STitch3D_df <- data.frame(Manual_annotation_STitch3D)
+Manual_annotation_STitch3D_df$Manual_annotation_STitch3D <- dplyr::recode(Manual_annotation_STitch3D_df$Manual_annotation_STitch3D, 
+                                   "Layer1" = "1",
+                                   "Layer2" = "2",
+                                   "Layer3" = "3",
+                                   "Layer4" = "4",
+                                   "Layer5" = "5",
+                                   "Layer6" = "6",
+                                   "WM" = "7")
+Manual_annotation_STitch3D_df
+```
+
+```{r}
+ARI_STitch3D <- adjustedRandIndex(STitch3D_labels_151673, Manual_annotation_STitch3D_df$Manual_annotation_STitch3D)
+NMI_STitch3D <- NMI(STitch3D_labels_151673, Manual_annotation_STitch3D_df$Manual_annotation_STitch3D)
+ARI_STitch3D #  0.5746382
+NMI_STitch3D #  0.7007096
+```
+
+#### BASS
+
+##### Input the dataset
+
+**Dataset** 
+
+3,639 (151673), 3,673 (151674), 3,592 (151675), and 3,460 (151676) spots along with their spatial locations
+
+```{r}
+load("/dski/nobackup/xiaoyinl/BASS-Analysis/data/spatialLIBD_p3.RData")
+```
+
+##### Running the algorithm
+
+```{r,message=FALSE}
+library(BASS)
+library(Matrix)
+# hyper-parameters
+# We set the number of cell types to a relatively large
+# number (20) to capture the expression heterogeneity.
+C <- 20
+# number of spatial domains
+R <- 7
+```
+
+```{r}
+set.seed(2023)
+# Set up BASS object
+BASS <- createBASSObject(cntm, xym, C = C, R = R,
+  beta_method = "SW", init_method = "mclust", 
+  nsample = 10000)
+```
+
+```{r,warning=FALSE}
+# Data pre-processing:
+# 1.Library size normalization followed with a log2 transformation
+# 2.Select top 3000 spatially expressed genes with SPARK-X
+# 3.Dimension reduction with PCA
+BASS <- BASS.preprocess(BASS, doLogNormalize = TRUE,
+  geneSelect = "sparkx", nSE = 3000, doPCA = TRUE, 
+  scaleFeature = FALSE, nPC = 20)
+```
+
+```{r}
+# Run BASS algorithm
+BASS <- BASS.run(BASS)
+```
+
+```{r}
+# post-process posterior samples:
+# 1.Adjust for label switching with the ECR-1 algorithm
+# 2.Summarize the posterior samples to obtain the spatial domain labels
+BASS <- BASS.postprocess(BASS)
+```
+
+```{r}
+zlabels <- BASS@results$z # spatial domain labels
+```
+
+```{r}
+labels_151673 <- zlabels[[1]]
+labels_151673
+```
+
+```{r}
+labels_151674 <- zlabels[[2]]
+labels_151674
+```
+
+```{r}
+labels_151675 <- zlabels[[3]]
+labels_151675
+```
+
+```{r}
+labels_151676 <- zlabels[[4]]
+labels_151676
+```
+
+```{r}
+write.csv(labels_151673,"/dski/nobackup/xiaoyinl/DLPFC_analysis/BASS_labels/BASS_labels_151673")
+```
+
+```{r}
+write.csv(labels_151674,"/dski/nobackup/xiaoyinl/DLPFC_analysis/BASS_labels/BASS_labels_151674")
+```
+
+```{r}
+write.csv(labels_151675,"/dski/nobackup/xiaoyinl/DLPFC_analysis/BASS_labels/BASS_labels_151675")
+```
+
+```{r}
+write.csv(labels_151676,"/dski/nobackup/xiaoyinl/DLPFC_analysis/BASS_labels/BASS_labels_151676")
+```
+
+##### 151673
+
+```{r}
+BASS_labels_151673 <- read.csv("/dski/nobackup/xiaoyinl/DLPFC_analysis/BASS_labels/BASS_labels_151673")
+```
+
+```{r}
+BASS_labels_151673_chosen <- BASS_labels_151673$x
+```
+
+```{r}
+## We recoded the cluster labels to match the expected brain layers
+BASS_labels_151673_recode <- dplyr::recode(BASS_labels_151673_chosen, 7, 5, 3, 4, 6, 1, 2)
+```
+
+```{r}
+## View results
+clusterPlot(dlpfc_151673,label=BASS_labels_151673_recode, palette=NULL, size=0.05)+
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="BASS")
+```
+
+#### Evaluation
+##### Ground truth
+
+```{r}
+Manual_annotation <- dlpfc_151673@colData$layer_guess_reordered
+```
+
+```{r}
+Manual_annotation_df <- data.frame(Manual_annotation)
+# Convert factor to character
+Manual_annotation_df$Manual_annotation <- as.character(Manual_annotation_df$Manual_annotation)
+# Recode including NA values
+Manual_annotation_df$Manual_annotation <- dplyr::recode(Manual_annotation_df$Manual_annotation, 
+                                   "Layer1" = "1",
+                                   "Layer2" = "2",
+                                   "Layer3" = "3",
+                                   "Layer4" = "4",
+                                   "Layer5" = "5",
+                                   "Layer6" = "6",
+                                   "WM" = "7",
+                                   .missing = "7")
+# Convert back to factor if needed
+Manual_annotation_df$Manual_annotation <- as.factor(Manual_annotation_df$Manual_annotation)
+Manual_annotation_df
+```
+
+```{r}
+ground_truth_label = Manual_annotation_df$Manual_annotation
+```
+
+```{r}
+clustering_summary_df <- data.frame(
+  k_means_clusters_151673,
+  hclust_clusters_151673,
+  louvain_clusters_151673,
+  BayesSpace_labels_151673,
+  HMRF_labels_151673,
+  BASS_labels_151673_chosen
+)
+```
+
+```{r}
+ARI_k_means_PCA_results <- adjustedRandIndex(ground_truth_label, clustering_summary_df$k_means_clusters_151673)
+ARI_hclust_PCA_results  <- adjustedRandIndex(ground_truth_label, clustering_summary_df$hclust_clusters_151673)
+ARI_louvain_PCA_results  <- adjustedRandIndex(ground_truth_label, clustering_summary_df$louvain_clusters_151673)
+ARI_giotto_PCA_results <- adjustedRandIndex(ground_truth_label,clustering_summary_df$HMRF_labels_151673)
+ARI_BayesSpace_PCA_results  <- adjustedRandIndex(ground_truth_label, clustering_summary_df$BayesSpace_labels_151673)
+#ARI_Banksy_PCA_results <- adjustedRandIndex(ground_truth_label,clustering_summary_df$spatial_cluster_Banksy_clusters)
+ARI_BASS_results <- adjustedRandIndex(ground_truth_label,clustering_summary_df$BASS_labels_151673_chosen)
+```
+
+```{r}
+ARI_results_df <- data.frame(
+    ARI_k_means_PCA_results, 
+    ARI_hclust_PCA_results, 
+    ARI_louvain_PCA_results, 
+    ARI_giotto_PCA_results, 
+    ARI_BayesSpace_PCA_results, 
+    ARI_BASS_results
+  )
+ARI_results_df
+```
+
+```{r}
+NMI_k_means_PCA_results <- NMI(ground_truth_label, clustering_summary_df$k_means_clusters_151673)
+NMI_hclust_PCA_results  <- NMI(ground_truth_label, clustering_summary_df$hclust_clusters_151673)
+NMI_louvain_PCA_results  <- NMI(ground_truth_label, clustering_summary_df$louvain_clusters_151673)
+NMI_giotto_PCA_results <- NMI(ground_truth_label,clustering_summary_df$HMRF_labels_151673)
+NMI_BayesSpace_PCA_results  <- NMI(ground_truth_label, clustering_summary_df$BayesSpace_labels_151673)
+#NMI_Banksy_PCA_results <- NMI(ground_truth_label,clustering_summary_df$spatial_cluster_Banksy_clusters)
+NMI_BASS_results <- NMI(ground_truth_label,clustering_summary_df$BASS_labels_151673_chosen)
+```
+
+```{r}
+NMI_results_df <- data.frame(
+    NMI_k_means_PCA_results, 
+    NMI_hclust_PCA_results, 
+    NMI_louvain_PCA_results, 
+    NMI_giotto_PCA_results, 
+    NMI_BayesSpace_PCA_results, 
+    NMI_BASS_results
+  )
+NMI_results_df
+```
+
+```{r}
+library(ggplot2)
+library(RColorBrewer)
+
+ari_data <- data.frame(
+  Method = c(
+    "BayesSpace", 
+    "BANKSY",
+    "K-means", 
+    "Hierarchical",
+    "Louvain", 
+    "BASS",
+    "HMRF",
+    "STitch3D",
+    "CARD",
+    "RCTD"),
+  ARI = c(
+    0.5375717, 
+    0.3265748,
+    0.2669568, 
+    0.2318858, 
+    0.2938219, 
+    0.5869484, 
+    0.3446974,
+    0.5746382,
+    0.4167843,
+    0.4964387),
+  Category = c(
+    "2D Spatial Clustering", 
+    "2D Spatial Clustering", 
+    "Classical Clustering", 
+    "Classical Clustering", 
+    "Classical Clustering", 
+    "3D Spatial Clustering", 
+    "2D Spatial Clustering", 
+    "3D Spatial Clustering", 
+    "2D Spatial Clustering", 
+    "2D Spatial Clustering")
+)
+
+ari_data$Category <- factor(ari_data$Category, levels = c("Classical Clustering", "2D Spatial Clustering", "3D Spatial Clustering"))
+
+colors <- c("Classical Clustering" = "#F4A582", 
+            "2D Spatial Clustering" = "#FDDBC7", 
+            "3D Spatial Clustering" =  "#D1E5F0")
+
+ggplot(ari_data, aes(x = reorder(Method, ARI), y = ARI, fill = Category)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "ARI Evaluation", x = "Method", y = "ARI",fill="Method Category") +
+  scale_fill_manual(values = colors) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+library(ggplot2)
+library(RColorBrewer)
+
+NMI_data <- data.frame(
+  Method = c(
+    "BayesSpace", 
+    "BANKSY",
+    "K-means", 
+    "Hierarchical",
+    "Louvain", 
+    "BASS",
+    "HMRF",
+    "STitch3D",
+    "CARD",
+    "RCTD"),
+  NMI = c(
+    0.6564575, 
+    0.4378206,
+    0.3876779, 
+    0.3789865, 
+    0.3962948, 
+    0.6847375, 
+    0.4466828,
+    0.7007096,
+    0.5283489,
+    0.5678436),
+  Category = c(
+    "2D Spatial Clustering", 
+    "2D Spatial Clustering", 
+    "Classical Clustering", 
+    "Classical Clustering", 
+    "Classical Clustering", 
+    "3D Spatial Clustering", 
+    "2D Spatial Clustering", 
+    "3D Spatial Clustering", 
+    "2D Spatial Clustering", 
+    "2D Spatial Clustering")
+)
+
+NMI_data$Category <- factor(NMI_data$Category, levels = c("Classical Clustering", "2D Spatial Clustering", "3D Spatial Clustering"))
+
+colors <- c("Classical Clustering" = "#F4A582", 
+            "2D Spatial Clustering" = "#FDDBC7", 
+            "3D Spatial Clustering" =  "#D1E5F0")
+```
+
+```{r}
+ggplot(NMI_data, aes(x = reorder(Method, NMI), y = NMI, fill = Category)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "NMI Evaluation", x = "Method", y = "NMI",fill="Method Category") +
+  scale_fill_manual(values = colors) +
+  theme(legend.position = "bottom")
+```
+
+#### Comparison(Visualization)
+
+```{r}
+clusters_df <- as.data.frame(clusters)
+clusters_df
+```
+
+```{r}
+library(gridExtra)
+
+plot1 <- clusterPlot(dlpfc, label=clusters_df$k.means, palette=NULL, size=0.05) +
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="k-means")
+
+plot2 <- clusterPlot(dlpfc, label=clusters_df$hclust, palette=NULL, size=0.05) +
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="Hierarchical (Ward)")
+
+plot3 <- clusterPlot(dlpfc, label=clusters_df$Louvain, palette=NULL, size=0.05) +
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="Louvain")
+
+plot4 <- clusterPlot(dlpfc, label=clusters_df$mclust, palette=NULL, size=0.05) +
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="mclust")
+
+plot5 <- clusterPlot(dlpfc, label=clusters_df$BayesSpace..t.distributed.error., palette=NULL, size=0.05) +
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="BayesSpace (t-distributed error)")
+
+plot6 <- clusterPlot(dlpfc, label=clusters_df$BayesSpace..normal.error., palette=NULL, size=0.05) +
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="BayesSpace (normal error)")
+
+plot7 <- clusterPlot(dlpfc, label=clusters_df$Giotto, palette=NULL, size=0.05) +
+  scale_fill_viridis_d(option = "A", labels = 1:7) +
+  labs(title="Giotto HMRF")
+```
+
+```{r}
+grid.arrange(plot1, plot2, plot3, plot4, plot5, plot6, plot7, ncol = 4, nrow =2)
+```
+
+#### Evaluation
+
+Finally, to evaluate each algorithm’s cluster assignments, we use the manual annotations provided with the original data by Maynard et al. We also compare the cluster assignments reported in this paper using the Walktrap clustering algorithm (a non-spatial hierarchical clustering algorithm.)
+
+```{r}
+clusters_df <- as.data.frame(clusters)
+clusters_df
+```
+
+```{r}
+clusters_df$Manual_annotation <- dlpfc@colData$layer_guess_reordered
+clusters_df
+```
+
+```{r}
+ARI <- purrr::map(clusters_df, function(x) mclust::adjustedRandIndex(x, clusters_df$Manual_annotation))
+ARI
+```
+
+```{r}
+library(ggplot2)
+library(RColorBrewer)
+
+colors <- c("#B2182B","#D6604D","orange","#F4A582","#FDDBC7","pink","#D1E5F0","lightblue","#92C5DE","#4393C3","#2166AC")
+
+ari_data <- data.frame(
+  Method = c(
+    "BayesSpace", 
+    "k-means", 
+    "hclust",
+    "Louvain", 
+    "mclust", 
+    "BASS", 
+    "DR_SC (HVG)", 
+    "DR_SC (SVG)", 
+    "Giotto",
+    "STitch3D"
+  ),
+  ARI = c(
+    0.54647, 
+    0.2734458, 
+    0.2349343, 
+    0.2860929, 
+    0.4380811, 
+    0.5987186, 
+    0.322173, 
+    0.486127, 
+    0.3520176,
+    0.5746382
+  )
+)
+
+ari_data <- ari_data[order(ari_data$ARI, decreasing = TRUE), ]
+
+ggplot(ari_data, aes(x = reorder(Method, -ARI), y = ARI, fill = Method)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "ARI Evaluation", x = "Method", y = "ARI") +
+  coord_flip() +
+  scale_fill_manual(values = colors)
+```
