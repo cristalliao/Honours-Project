@@ -1,0 +1,771 @@
+---
+title: "Pattern_two_analysis_simulation"
+output: html_document
+date: "2023-10-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,warning=FALSE,error=FALSE,massage=FALSE,prompt=FALSE}
+suppressPackageStartupMessages({
+library(readr)
+library(Seurat)
+library(SeuratDisk)
+library(SeuratObject)
+library(anndata)
+library(ggplot2)
+library(factoextra) # clustering visualization
+library(mclust)
+library(zinbwave)
+library(SingleCellExperiment)
+library(aricode)
+library(pscl)
+library(knitr)
+library(kableExtra)
+library(Biobase)
+library(Matrix)
+library(MCMCpack)
+library(Hmisc)
+library(tidyverse)  # data manipulation
+library(cluster)  # clustering algorithms
+library(dendextend) # for comparing two dendrograms
+library(dplyr)
+library(GGally) # correlation plot
+library(tidyr)
+library(flextable)
+library(NMF)
+library(ggpubr) # MDS
+library(RcppML) 
+library(reshape2) 
+library(cowplot) 
+library(MAST)
+library(smfishHmrf)
+library(trendsceek)
+library(sparklyr)
+library(multinet)
+library(RTriangle)
+library(FactoMineR)
+library(jackstraw)
+library(CARD)
+library(spacexr)
+library(gridExtra)
+library(pbmcapply)
+library(Giotto)
+library(smfishHmrf)
+library(BayesSpace)
+library(Banksy)
+library(gridExtra)
+})
+```
+
+```{r}
+# Load the dataset
+### Reference dataset
+ExpressionSet <- readRDS("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/ExpressionSet.rds")
+
+### Pattern label
+pattern_gp_label = readRDS("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/pattern_gp_label_pattern_two.rds")
+
+### Load functions
+generateMultiN = readRDS("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/generateMultiN_function_pattern_two.rds")
+
+generateSpatial_norep_fixedProp = readRDS("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/generateSpatial_norep_fixedProp_function_pattern_two.rds")
+
+ct.varname = "cellType"
+ct.select = c("Smooth muscle cells", 
+              "Immune cells", 
+              "Epicardial cells",
+              "Erythrocytes",
+              "Fibroblast-like",
+              "Atrial cardiomyocytes")
+sample.varname = "sampleID"
+
+# Initialize parameters for the simulation
+imix <- 0
+ntotal <- 10
+mix1 = mix2 = mix3 = c(1 - (0.2 * imix),0.2*imix)
+
+# Initialize a list to store the simulated results
+simulated_results <- list()
+
+for(i in 1:100) {
+  # Set seed
+  iseed <- 2022 + i
+  set.seed(iseed)
+
+  # Generate simulation
+  spatial.pseudo = generateSpatial_norep_fixedProp(
+    seed = iseed,
+    ExpressionSet = ExpressionSet,
+    ct.varname = ct.varname,
+    sample.varname = sample.varname,
+    ct.select = ct.select,
+    sample.withRep = F,
+    pattern_gp_label = pattern_gp_label,
+    ntotal = ntotal,
+    mix1 = mix1,
+    mix2 = mix2,
+    mix3 = mix3
+  )
+
+  # Convert the result to a dataframe
+  simulated_count_data_df = as.data.frame(spatial.pseudo$pseudo.data)
+  
+  # Store the result in the list
+  simulated_results[[i]] <- simulated_count_data_df
+}
+```
+
+```{r}
+saveRDS(simulated_results,`"/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/simulated_results_n100.rds")
+```
+
+```{r}
+# Check one of the results (for example, the first result)
+simulated_results[[50]]
+```
+
+```{r}
+## Location
+pattern_two <- read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis/simulation_data_pattern_two.csv")
+rownames(pattern_two) <- pattern_two$X
+pattern_two$X <- NULL
+## Ground Truth
+ground_truth_label <- pattern_two$label
+## Location data frame
+pattern_two_location <- pattern_two
+pattern_two_location$label <- NULL
+```
+
+```{r, warning=FALSE, message=FALSE}
+ARI_results_list <- list()
+NMI_results_list <- list()
+all_intensity_k_means_PCA_clusters <- list()
+all_intensity_hclust_PCA_clusters <- list()
+all_intensity_louvain_PCA_clusters <- list()
+all_spatial_cluster_Giotto_clusters <- list()
+all_spatial_cluster_BayesSpace_clusters <- list()
+all_spatial_cluster_Banksy_clusters <- list()
+all_k_means_RCTD_clusters <- list()
+all_k_means_CARD_clusters <- list()
+
+for (i in 1:length(simulated_results)) {
+  # Set the seed based on the iteration
+  iseed <- 2022 + i
+  set.seed(iseed)
+  
+  # Simulated dataset
+  simulated_count_data_df <- simulated_results[[i]]
+  simulated_count_data_matrix <- as.matrix(simulated_count_data_df)
+  
+  # Analysis
+  ## Dimension reduction: PCA
+  ### Creat Seurat object
+  seurat_object <- CreateSeuratObject(counts = simulated_count_data_df)
+  
+  ### Normalize the data
+  seurat_object <- NormalizeData(seurat_object)
+  
+  ### Select highly variable genes
+  seurat_hvg_top_2000<- FindVariableFeatures(seurat_object, selection.method = "vst", nfeatures = 2000)
+  
+  ### Save the top 2000 HVGs
+  var_features <- VariableFeatures(seurat_hvg_top_2000)
+  var_features_data <- seurat_hvg_top_2000[["RNA"]]@counts[var_features, ]
+  gene_expression_hvg_top_2000_df <- as.data.frame(as.matrix(var_features_data))
+  
+  ### Scale the data
+  all_genes <- rownames(seurat_hvg_top_2000)
+  seurat_hvg_top_2000 <- ScaleData(seurat_hvg_top_2000, features = all_genes)
+  
+  ### Perform PCA
+  seurat_hvg_top_2000 <- RunPCA(seurat_hvg_top_2000, features = VariableFeatures(seurat_hvg_top_2000), npcs = 20)
+  
+  #### Extract PCA results[20 PCs]
+  pca_data <- Embeddings(object = seurat_hvg_top_2000, reduction = "pca")
+  pca_data_selected_dimension <- pca_data[, 1:20]
+  pca_data_selected_dimension_df <- as.data.frame(pca_data_selected_dimension)
+  
+  ## Clustering analysis
+  ### K-means
+  intensity_k_means_PCA <- kmeans(pca_data_selected_dimension_df, centers = 3)  
+  intensity_k_means_PCA_clusters <- intensity_k_means_PCA$cluster
+  
+  ### Hierarchical clustering
+  #### Dissimilarity matrix
+  PCA_results_matrix <- dist(pca_data_selected_dimension_df, method = "euclidean")
+  #### Ward's method
+  PCA_results_hclust_ward <- hclust(PCA_results_matrix, method = "ward.D2" )
+  #### Cut tree into 3 groups
+  intensity_hclust_PCA_clusters <- cutree(PCA_results_hclust_ward, k = 3)
+  
+  ### Louvain Community detection
+  gene_expression_hvg_top_2000_matrix <-
+      as.matrix(gene_expression_hvg_top_2000_df)
+  sce_louvain <- SingleCellExperiment(assays=list(
+      counts=as(gene_expression_hvg_top_2000_matrix,"dgCMatrix")))
+  
+  #### PCA processing
+  pca_data_selected_dimension_matrix <- as.matrix(pca_data_selected_dimension_df)
+  reducedDims(sce_louvain)[["PCA"]] <- pca_data_selected_dimension_matrix
+  g.jaccard = scran::buildSNNGraph(sce_louvain, use.dimred="PCA", type="jaccard")
+  
+  #### Find cluster number == 3
+  resolution_values <- seq(0.1, 3.0, by = 0.01)
+  optimal_resolution <- NULL
+  
+  for (res in resolution_values) {
+      louvain_clusters_k3 <- igraph::cluster_louvain(g.jaccard, resolution = res)$membership
+      if (length(unique(louvain_clusters_k3)) == 3) {
+          optimal_resolution <- res
+          intensity_louvain_PCA_clusters <- louvain_clusters_k3
+          break
+      }
+  }
+  
+  if (is.null(optimal_resolution)) {
+      print("No optimal resolution found for exactly 3 clusters.")
+  }
+  
+  ### Giotto: HRMF
+  #### processing
+  my_instructions = createGiottoInstructions(python_path = '/albona/nobackup/xiaoyinl/anaconda3/envs/giotto_env/bin/python')
+  expr_Giotto <- as.matrix(gene_expression_hvg_top_2000_df)
+  location_Giotto <- pattern_two_location
+  my_giotto_object <- createGiottoObject(raw_exprs = expr_Giotto, 
+                                         spatial_locs = location_Giotto, 
+                                         instructions = my_instructions)
+  my_giotto_object <- filterGiotto(gobject = my_giotto_object, 
+                                   expression_threshold = 0.5, 
+                                   gene_det_in_min_cells = 20, 
+                                   min_det_genes_per_cell = 0)
+  my_giotto_object <- normalizeGiotto(gobject = my_giotto_object)
+  
+  #### create network (required for binSpect methods)
+  my_giotto_object = createSpatialNetwork(gobject = my_giotto_object, minimum_k = 2)
+  
+  #### identify genes with a spatial coherent expression profile
+  km_spatialgenes = binSpect(my_giotto_object, bin_method = 'kmeans')
+  
+  #### create a directory to save your HMRF results to
+  hmrf_folder = paste0(getwd(),'/','hmrf_folder_save/')
+  if(!file.exists(hmrf_folder)) dir.create(hmrf_folder, recursive = T)
+  
+  #### perform hmrf
+  my_spatial_genes = km_spatialgenes[1:100]$genes
+  HMRF_spatial_genes = doHMRF(gobject = my_giotto_object,
+                              expression_values = 'scaled',
+                              spatial_genes = my_spatial_genes,
+                              spatial_network_name = 'Delaunay_network',
+                              k = 3,
+                              betas = c(28,2,2),
+                              output_folder = paste0(hmrf_folder, '/',
+                                    'Spatial_genes/SG_top100_k3_scaled'))
+  
+  #### Add the HMRF results
+  my_giotto_object = addHMRF(gobject = my_giotto_object,
+                                      HMRFoutput = HMRF_spatial_genes,
+                                      k = 3, betas_to_add = c(28),
+                                      hmrf_name = 'HMRF')
+  
+  #### Save the results
+  spatial_cluster_Giotto_clusters <- as.numeric(my_giotto_object@cell_metadata$HMRF_k3_b.28)
+  
+  ### BayesSpace
+  gene_expression_hvg_top_2000_matrix <- as.matrix(gene_expression_hvg_top_2000_df)
+  location_BayesSpace <- pattern_two_location
+  sce_pca <- SingleCellExperiment(assays=list(
+    counts=as(gene_expression_hvg_top_2000_matrix,"dgCMatrix")))
+  colData(sce_pca)$array_row <- location_BayesSpace$x
+  colData(sce_pca)$array_col <- location_BayesSpace$y
+  
+  #### Add the PCA results
+  sce_pca <- spatialPreprocess(sce_pca, platform="ST", 
+                                n.PCs=20, n.HVGs=2000, log.normalize=TRUE)
+  
+  #### Perform BayesSpace
+  sce_pca <- spatialCluster(sce_pca, 
+                            q=3, 
+                            platform="ST", 
+                            use.dimred = "PCA",
+                            d=20,
+                            init.method="mclust",
+                            model="t", 
+                            gamma=2,
+                            nrep=10000, 
+                            burn.in=100,
+                            save.chain=TRUE)
+  
+  sce_pca_df <- as.data.frame(colData(sce_pca))
+  spatial_cluster_BayesSpace_clusters <- sce_pca_df$spatial.cluster
+  
+  ### Banksy
+  #### Preprocessing
+  pca_data_selected_dimension_transpose <- t(pca_data_selected_dimension_df) # PCA results
+  pca_data_selected_dimension_transpose_df <- as.data.frame(pca_data_selected_dimension_transpose)
+  expr_banksy <- as.matrix(pca_data_selected_dimension_transpose_df)
+  location_bankdy <- pattern_two_location
+  
+  #### Find cluster number == 3
+  resolution_values <- seq(0.1, 2.0, by = 0.01)
+  
+  optimal_resolution <- NULL
+  
+  for (res in resolution_values) {
+    bank_pattern_two <- BanksyObject(own.expr = expr_banksy, cell.locs = location_bankdy)
+    bank_pattern_two <- ClusterBanksy(bank_pattern_two, method = 'leiden', pca = FALSE, resolution = res)
+    col_name <- paste0("clust_M1_lam0.2_k50_res", res)
+  
+    bank_pattern_two_meta_data_df <- as.data.frame(bank_pattern_two@meta.data)
+    Banksy_clusters_k3 <- bank_pattern_two_meta_data_df[[col_name]]
+    
+    if (length(unique(Banksy_clusters_k3)) == 3) {
+      optimal_resolution <- res
+      spatial_cluster_Banksy_clusters <- Banksy_clusters_k3
+      break
+    }
+  }
+  
+  if (is.null(optimal_resolution)) {
+    print("No optimal resolution found for exactly 3 clusters.")
+  }
+  
+  ### RCTD
+  #### Load the dataset
+  ##### Reference
+  reference_object = readRDS("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/reference_object_RCTD.rds")
+  
+  ##### Spatial Transcriptomics data
+  ###### Coordinates
+  location_RCTD <- pattern_two_location
+  ###### nUMI
+  nUMI_spatial <- colSums(simulated_count_data_df) # In this case, total counts per pixel is nUMI
+  ###### Create SpatialRNA object
+  SpatialRNA_object <- SpatialRNA(location_RCTD, simulated_count_data_df, nUMI_spatial)
+  
+  #### RCTD algorithm
+  myRCTD <- create.RCTD(SpatialRNA_object, reference_object, max_cores = 1)
+  myRCTD <- run.RCTD(myRCTD, doublet_mode = 'doublet')
+  
+  #### RCTD results
+  results <- myRCTD@results
+  ##### normalize the cell type proportions to sum to 1.
+  norm_weights = normalize_weights(results$weights) 
+  cell_type_names <- myRCTD@cell_type_info$info[[2]] #list of cell type names
+  spatialRNA <- myRCTD@spatialRNA
+  
+  ##### cell type proportion
+  RCTD_cell_type_proportion_matrix <- as.matrix(norm_weights)
+  RCTD_cell_type_proportion_df <- as.data.frame(RCTD_cell_type_proportion_matrix)
+  
+  ##### RCTD + K-means
+  k_means_RCTD <- kmeans(RCTD_cell_type_proportion_df, centers = 3)  
+  k_means_RCTD_clusters <- k_means_RCTD$cluster
+  
+  ### CARD
+  #### Input data
+  ##### Single cell RNAseq ((scRNA-seq)) data
+  scRNA_seq_count <- readRDS("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/scRNA_seq_count.rds")
+  
+  ##### celltype reference
+  scRNA_seq_meta = readRDS("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/scRNA_seq_meta.rds")
+  
+  ##### Simulate count data
+  simulated_count_data_sparse_matrix <- as.matrix(simulated_count_data_df)
+  spatial_count_matrix <- as(simulated_count_data_sparse_matrix, "matrix")
+  
+  ##### location
+  location_CARD <- pattern_two_location
+  
+  #### Create an CARD object
+  CARD_obj = createCARDObject(
+  	sc_count = scRNA_seq_count,
+  	sc_meta = scRNA_seq_meta,
+  	spatial_count = spatial_count_matrix,
+  	spatial_location = location_CARD,
+  	ct.varname = "cellType",
+  	ct.select = unique(scRNA_seq_meta$cellType),
+  	sample.varname = "sampleInfo",
+  	minCountGene = 100,
+  	minCountSpot = 5) 
+  
+  #### Deconvolution using CARD
+  CARD_obj_deconvolution = CARD_deconvolution(CARD_object = CARD_obj)
+  CARD_obj_deconvolution_proportion_df <- as.data.frame(CARD_obj_deconvolution@Proportion_CARD)
+  
+  ##### CARD + K-means
+  k_means_CARD <- kmeans(CARD_obj_deconvolution_proportion_df, centers = 3)  
+  k_means_CARD_clusters <- k_means_CARD$cluster
+  
+  
+  ### Evaluation
+  #### ARI
+  ARI_k_means_PCA_results <- adjustedRandIndex(ground_truth_label, intensity_k_means_PCA_clusters)
+  ARI_hclust_PCA_results  <- adjustedRandIndex(ground_truth_label, intensity_hclust_PCA_clusters)
+  ARI_louvain_PCA_results  <- adjustedRandIndex(ground_truth_label, intensity_louvain_PCA_clusters)
+  ARI_giotto_PCA_results <- adjustedRandIndex(ground_truth_label,spatial_cluster_Giotto_clusters)
+  ARI_BayesSpace_PCA_results  <- adjustedRandIndex(ground_truth_label, spatial_cluster_BayesSpace_clusters)
+  ARI_Banksy_PCA_results <- adjustedRandIndex(ground_truth_label,spatial_cluster_Banksy_clusters)
+  ARI_k_means_RCTD_results <- ARI(ground_truth_label, k_means_RCTD_clusters)
+  ARI_k_means_CARD_results <- ARI(ground_truth_label, k_means_CARD_clusters)
+  
+  #### NMI
+  NMI_k_means_PCA_results <- NMI(ground_truth_label, intensity_k_means_PCA_clusters)
+  NMI_hclust_PCA_results  <- NMI(ground_truth_label, intensity_hclust_PCA_clusters)
+  NMI_louvain_PCA_results  <- NMI(ground_truth_label, intensity_louvain_PCA_clusters)
+  NMI_giotto_PCA_results <- NMI(ground_truth_label,spatial_cluster_Giotto_clusters)
+  NMI_BayesSpace_PCA_results  <- NMI(ground_truth_label, spatial_cluster_BayesSpace_clusters)
+  NMI_Banksy_spatial_PCA_results <- NMI(ground_truth_label,spatial_cluster_Banksy_clusters)
+  NMI_k_means_RCTD_results <- NMI(ground_truth_label, k_means_RCTD_clusters)
+  NMI_k_means_CARD_results <- NMI(ground_truth_label, k_means_CARD_clusters)
+
+  # Save ARI and NMI results
+  ARI_results_list[[i]] <- c(
+    ARI_k_means_PCA_results, 
+    ARI_hclust_PCA_results, 
+    ARI_louvain_PCA_results, 
+    ARI_giotto_PCA_results, 
+    ARI_BayesSpace_PCA_results, 
+    ARI_Banksy_PCA_results,
+    ARI_k_means_RCTD_results, 
+    ARI_k_means_CARD_results
+  )
+  
+  NMI_results_list[[i]] <- c(
+    NMI_k_means_PCA_results,
+    NMI_hclust_PCA_results,
+    NMI_louvain_PCA_results,
+    NMI_giotto_PCA_results,
+    NMI_BayesSpace_PCA_results,
+    NMI_Banksy_spatial_PCA_results,
+    NMI_k_means_RCTD_results,
+    NMI_k_means_CARD_results
+  )
+  # Save every clustering labels
+  all_intensity_k_means_PCA_clusters[[i]] <- intensity_k_means_PCA_clusters
+  all_intensity_hclust_PCA_clusters[[i]] <- intensity_hclust_PCA_clusters
+  all_intensity_louvain_PCA_clusters[[i]] <- intensity_louvain_PCA_clusters
+  all_spatial_cluster_Giotto_clusters[[i]] <- spatial_cluster_Giotto_clusters
+  all_spatial_cluster_BayesSpace_clusters[[i]] <- spatial_cluster_BayesSpace_clusters
+  all_spatial_cluster_Banksy_clusters[[i]] <- spatial_cluster_Banksy_clusters
+  all_k_means_RCTD_clusters[[i]] <- k_means_RCTD_clusters
+  all_k_means_CARD_clusters[[i]] <- k_means_CARD_clusters
+}
+
+ARI_df <- as.data.frame(do.call(rbind, ARI_results_list))
+NMI_df <- as.data.frame(do.call(rbind, NMI_results_list))
+# For intensity_k_means_PCA_clusters
+intensity_k_means_PCA_df <- as.data.frame(do.call(rbind, all_intensity_k_means_PCA_clusters))
+# For intensity_hclust_PCA_clusters
+intensity_hclust_PCA_df <- as.data.frame(do.call(rbind, all_intensity_hclust_PCA_clusters))
+# For intensity_louvain_PCA_clusters
+intensity_louvain_PCA_df <- as.data.frame(do.call(rbind, all_intensity_louvain_PCA_clusters))
+# For spatial_cluster_Giotto_clusters
+spatial_cluster_Giotto_df <- as.data.frame(do.call(rbind, all_spatial_cluster_Giotto_clusters))
+# For spatial_cluster_BayesSpace_clusters
+spatial_cluster_BayesSpace_df <- as.data.frame(do.call(rbind, all_spatial_cluster_BayesSpace_clusters))
+# For spatial_cluster_Banksy_clusters
+spatial_cluster_Banksy_df <- as.data.frame(do.call(rbind, all_spatial_cluster_Banksy_clusters))
+# For k_means_RCTD_clusters
+k_means_RCTD_df <- as.data.frame(do.call(rbind, all_k_means_RCTD_clusters))
+# For k_means_CARD_clusters
+k_means_CARD_df <- as.data.frame(do.call(rbind, all_k_means_CARD_clusters))
+```
+
+```{r}
+write.csv(ARI_df,"/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/ARI_df.csv")
+write.csv(NMI_df,"/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/NMI_df.csv")
+write.csv(intensity_k_means_PCA_df,"/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/intensity_k_means_PCA_df.csv")
+write.csv(intensity_hclust_PCA_df,"/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/intensity_hclust_PCA_df.csv")
+write.csv(intensity_louvain_PCA_df, "/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/intensity_louvain_PCA_df.csv")
+write.csv(spatial_cluster_Giotto_df, "/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/spatial_cluster_Giotto_df.csv")
+write.csv(spatial_cluster_BayesSpace_df, "/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/spatial_cluster_BayesSpace_df.csv")
+write.csv(spatial_cluster_Banksy_df, "/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/spatial_cluster_Banksy_df.csv")
+write.csv(k_means_RCTD_df, "/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/k_means_RCTD_df.csv")
+write.csv(k_means_CARD_df, "/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/k_means_CARD_df.csv")
+```
+
+```{r}
+ARI_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/ARI_df.csv")
+NMI_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/NMI_df.csv")
+intensity_k_means_PCA_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/intensity_k_means_PCA_df.csv")
+intensity_hclust_PCA_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/intensity_hclust_PCA_df.csv")
+intensity_louvain_PCA_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/intensity_louvain_PCA_df.csv")
+spatial_cluster_Giotto_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/spatial_cluster_Giotto_df.csv")
+spatial_cluster_BayesSpace_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/spatial_cluster_BayesSpace_df.csv")
+spatial_cluster_Banksy_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/spatial_cluster_Banksy_df.csv")
+k_means_RCTD_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/k_means_RCTD_df.csv")
+k_means_CARD_df = read.csv("/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/k_means_CARD_df.csv")
+```
+
+```{r}
+rownames(ARI_df) <- ARI_df$X
+ARI_df$X <- NULL
+rownames(NMI_df) <- NMI_df$X
+NMI_df$X <- NULL
+rownames(intensity_k_means_PCA_df) <- intensity_k_means_PCA_df$X
+intensity_k_means_PCA_df$X <- NULL
+rownames(intensity_hclust_PCA_df) <- intensity_hclust_PCA_df$X
+intensity_hclust_PCA_df$X <- NULL
+rownames(intensity_louvain_PCA_df) <- intensity_louvain_PCA_df$X
+intensity_louvain_PCA_df$X <- NULL
+rownames(spatial_cluster_Giotto_df) <- spatial_cluster_Giotto_df$X
+spatial_cluster_Giotto_df$X <- NULL
+rownames(spatial_cluster_BayesSpace_df) <- spatial_cluster_BayesSpace_df$X
+spatial_cluster_BayesSpace_df$X <- NULL
+rownames(spatial_cluster_Banksy_df) <- spatial_cluster_Banksy_df$X
+spatial_cluster_Banksy_df$X <- NULL
+rownames(k_means_RCTD_df) <- k_means_RCTD_df$X
+k_means_RCTD_df$X <- NULL
+rownames(k_means_CARD_df) <- k_means_CARD_df$X
+k_means_CARD_df$X <- NULL
+```
+
+```{r}
+ARI_df_transposed <- as.data.frame(t(ARI_df))
+NMI_df_transposed <- as.data.frame(t(NMI_df))
+rownames(ARI_df_transposed) <- c("k-means",
+                                 "hclust",
+                                 "louvain",
+                                 "Giotto",
+                                 "BayesSpace",
+                                 "Banksy",
+                                 "RCTD",
+                                 "CARD")
+rownames(NMI_df_transposed) <- c("k-means",
+                                 "hclust",
+                                 "louvain",
+                                 "Giotto",
+                                 "BayesSpace",
+                                 "Banksy",
+                                 "RCTD",
+                                 "CARD")
+ARI_df_transposed
+NMI_df_transposed
+```
+
+```{r}
+intensity_k_means_PCA_df_transposed <- as.data.frame(t(intensity_k_means_PCA_df))
+intensity_hclust_PCA_df_transposed <- as.data.frame(t(intensity_hclust_PCA_df))
+intensity_louvain_PCA_df_transposed <- as.data.frame(t(intensity_louvain_PCA_df))
+spatial_cluster_Giotto_df_transposed <- as.data.frame(t(spatial_cluster_Giotto_df))
+spatial_cluster_BayesSpace_df_transposed <- as.data.frame(t(spatial_cluster_BayesSpace_df))
+spatial_cluster_Banksy_df_transposed <- as.data.frame(t(spatial_cluster_Banksy_df))
+k_means_RCTD_df_transposed <- as.data.frame(t(k_means_RCTD_df))
+k_means_CARD_df_transposed <- as.data.frame(t(k_means_CARD_df))
+```
+
+```{r}
+dataframes_list <- list(
+  intensity_k_means_PCA_df_transposed,
+  intensity_hclust_PCA_df_transposed,
+  intensity_louvain_PCA_df_transposed,
+  spatial_cluster_Giotto_df_transposed,
+  spatial_cluster_BayesSpace_df_transposed,
+  spatial_cluster_Banksy_df_transposed,
+  k_means_RCTD_df_transposed,
+  k_means_CARD_df_transposed
+)
+
+names_list <- c(
+  "intensity_k_means_PCA",
+  "intensity_hclust_PCA",
+  "intensity_louvain_PCA",
+  "spatial_cluster_Giotto",
+  "spatial_cluster_BayesSpace",
+  "spatial_cluster_Banksy",
+  "k_means_RCTD",
+  "k_means_CARD"
+)
+
+for (i in 1:length(dataframes_list)) {
+  df <- dataframes_list[[i]]
+  print(paste("Checking dataframe:", names_list[i]))
+  
+  for (col_name in names(df)) {
+    if (length(table(df[[col_name]])) != 3) {
+      print(paste("Algorithm", names_list[i], "in col", col_name, "does not have 3 unique clusters."))
+    }
+  }
+}
+
+```
+
+### Data cleaning
+
+#### ARI
+
+```{r}
+columns_to_remove <- c("V5")
+ARI_df_clean <- ARI_df_transposed[, !(names(ARI_df_transposed) %in% columns_to_remove)]
+cols_to_remove <- apply(ARI_df_clean, 2, function(x) any(x < 0))
+ARI_df_clean <- ARI_df_clean[, !cols_to_remove]
+ARI_df_clean_transpose_df <- as.data.frame(t(ARI_df_clean))
+ARI_df_clean_transpose_df <- ARI_df_clean_transpose_df %>%
+  filter(BayesSpace >= 0.7)
+ARI_df_clean_transpose_df <- ARI_df_clean_transpose_df %>%
+  filter(RCTD >= 0.6)
+ARI_df_clean_transpose_df <- ARI_df_clean_transpose_df %>%
+  filter(Giotto >= 0.7)
+rownames(ARI_df_clean_transpose_df) <- gsub("V", "Simulation", rownames(ARI_df_clean_transpose_df))
+ARI_df_clean_transpose_df
+```
+
+```{r}
+write.csv(ARI_df_clean_transpose_df,"/dski/nobackup/xiaoyinl/human_heart_analysis/pattern_analysis/pattern_two_analysis_new/ARI_df_clean_transpose_df.csv")
+```
+
+```{r}
+ARI_df <- ARI_df_clean_transpose_df %>% 
+  rownames_to_column(var = "Simulation")
+
+ARI_df_long <- ARI_df %>%
+  pivot_longer(-Simulation, 
+               names_to = "Method", 
+               values_to = "ARI")
+
+ARI_df_long$Method <- recode(ARI_df_long$Method,
+  'k-means' = 'K-means',
+  'hclust' = 'Hierarchical',
+  'louvain' = 'Louvain',
+  'Giotto' = 'HMRF',
+  'BayesSpace' = 'BayesSpace',
+  'Banksy' = 'BANKSY',
+  'RCTD' = 'RTCD',
+  'CARD' = 'CARD'
+)
+
+ARI_df_long$Category <- case_when(
+  ARI_df_long$Method %in% c("K-means", "Hierarchical", "Louvain") ~ "Classical Clustering",
+  ARI_df_long$Method %in% c("HMRF", "BayesSpace", "BANKSY") ~ "Spatial Clustering",
+  ARI_df_long$Method %in% c("CARD", "RTCD") ~ "Deconvolution + K-means",
+  TRUE ~ NA_character_
+)
+
+ARI_df_long
+```
+
+```{r}
+category_colors <- c("Classical Clustering" = "#8DD3C7", "Deconvolution + K-means" = "#FDB462", "Spatial Clustering" = "#FB8072")
+ARI_df_long$Method <- factor(ARI_df_long$Method, levels = c("K-means", "Hierarchical", "Louvain", "HMRF", "BayesSpace", "BANKSY","CARD","RTCD"))
+ggplot(ARI_df_long, aes(x = Method, y = ARI)) +
+  geom_boxplot(aes(fill = Category), outlier.shape = NA) +
+  geom_jitter(aes(color = Simulation), width = 0.2) +
+  scale_fill_manual(values = category_colors, breaks = c("Classical Clustering", "Spatial Clustering", "Deconvolution + K-means")) + 
+  theme_minimal() +
+  labs(title = "ARI Comparison") +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(title = "Method Category")) +
+  guides(color = guide_legend(title = "Simulation"))
+```
+
+```{r}
+outliers_df <- data.frame()
+
+for (method in unique(ARI_df_long$Method)) {
+  subset_df <- subset(ARI_df_long, Method == method)
+  outlier_subset <- subset(subset_df, 
+                           ARI < quantile(subset_df$ARI, 0.25) - 1.5 * IQR(subset_df$ARI) | 
+                           ARI > quantile(subset_df$ARI, 0.75) + 1.5 * IQR(subset_df$ARI))
+  outliers_df <- rbind(outliers_df, outlier_subset)
+}
+
+ggplot(ARI_df_long, aes(x = Method, y = ARI)) +
+  geom_boxplot(aes(fill = Category), outlier.shape = NA) +
+  geom_point(data = outliers_df, position = position_jitter(width = 0.2), color = "black", size = 1) +
+  scale_fill_manual(values = category_colors, breaks = c("Classical Clustering", "Spatial Clustering", "Deconvolution + K-means")) + 
+  theme_minimal() +
+  labs(title = "ARI Comparison") +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(title = "Method Category")) +
+  guides(color = guide_legend(title = "Simulation"))
+```
+
+#### NMI
+
+```{r}
+NMI_df_clean_transposed_df <- as.data.frame(t(NMI_df_transposed))
+rownames(NMI_df_clean_transposed_df) <- gsub("V", "Simulation", rownames(NMI_df_clean_transposed_df))
+NMI_df_clean_transposed_df
+```
+
+```{r}
+selected_rows <- rownames(ARI_df_clean_transpose_df)
+filtered_NMI_df <- NMI_df_clean_transposed_df[selected_rows, ]
+```
+
+```{r}
+filtered_NMI_df
+```
+
+```{r}
+NMI_df <- filtered_NMI_df %>% 
+  rownames_to_column(var = "Simulation")
+
+NMI_df_long <- NMI_df %>%
+  pivot_longer(-Simulation, 
+               names_to = "Method", 
+               values_to = "NMI")
+
+NMI_df_long$Method <- recode(NMI_df_long$Method,
+  'k-means' = 'K-means',
+  'hclust' = 'Hierarchical',
+  'louvain' = 'Louvain',
+  'Giotto' = 'HMRF',
+  'BayesSpace' = 'BayesSpace',
+  'Banksy' = 'BANKSY',
+  'RCTD' = 'RTCD',
+  'CARD' = 'CARD'
+)
+
+NMI_df_long$Category <- case_when(
+  NMI_df_long$Method %in% c("K-means", "Hierarchical", "Louvain") ~ "Classical Clustering",
+  NMI_df_long$Method %in% c("HMRF", "BayesSpace", "BANKSY") ~ "Spatial Clustering",
+  NMI_df_long$Method %in% c("CARD", "RTCD") ~ "Deconvolution + K-means",
+  TRUE ~ NA_character_
+)
+
+NMI_df_long
+```
+
+```{r}
+category_colors <- c("Classical Clustering" = "#8DD3C7", "Deconvolution + K-means" = "#FDB462", "Spatial Clustering" = "#FB8072")
+NMI_df_long$Method <- factor(NMI_df_long$Method, levels = c("K-means", "Hierarchical", "Louvain", "HMRF", "BayesSpace", "BANKSY","CARD","RTCD"))
+ggplot(NMI_df_long, aes(x = Method, y = NMI)) +
+  geom_boxplot(aes(fill = Category), outlier.shape = NA) +
+  geom_point(data = subset(NMI_df_long, NMI < quantile(NMI_df_long$NMI, 0.25) - 1.5 * IQR(NMI_df_long$NMI) | 
+                                       NMI > quantile(NMI_df_long$NMI, 0.75) + 1.5 * IQR(NMI_df_long$NMI)), 
+             position = position_jitter(width = 0.2), color = "black", size = 1) +
+  scale_fill_manual(values = category_colors, breaks = c("Classical Clustering", "Spatial Clustering", "Deconvolution + K-means")) + 
+  theme_minimal() +
+  labs(title = "NMI Comparison") +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(title = "Method Category")) +
+  guides(color = guide_legend(title = "Simulation"))
+```
+
+```{r}
+outliers_df <- data.frame()
+
+for (method in unique(NMI_df_long$Method)) {
+  subset_df <- subset(NMI_df_long, Method == method)
+  outlier_subset <- subset(subset_df, 
+                           ARI < quantile(subset_df$ARI, 0.25) - 1.5 * IQR(subset_df$ARI) | 
+                           ARI > quantile(subset_df$ARI, 0.75) + 1.5 * IQR(subset_df$ARI))
+  outliers_df <- rbind(outliers_df, outlier_subset)
+}
+
+ggplot(NMI_df_long, aes(x = Method, y = ARI)) +
+  geom_boxplot(aes(fill = Category), outlier.shape = NA) +
+  geom_point(data = outliers_df, position = position_jitter(width = 0.2), color = "black", size = 2) +
+  scale_fill_manual(values = category_colors, breaks = c("Classical Clustering", "Spatial Clustering", "Deconvolution + K-means")) + 
+  theme_minimal() +
+  labs(title = "NMI Comparison") +
+  theme(legend.position = "right", axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(title = "Method Category")) +
+  guides(color = guide_legend(title = "Simulation"))
+```
